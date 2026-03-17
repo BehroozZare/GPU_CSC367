@@ -3,7 +3,7 @@
 #SBATCH --partition=csc367-compute
 #SBATCH --job-name profiling
 #SBATCH --gres=gpu
-#SBATCH --output=profiling_%j.out
+#SBATCH --output=%x_%j.out
 
 set -euo pipefail
 
@@ -15,11 +15,12 @@ fi
 TP="$1"
 BLOCK_SIZE="$2"
 
+WORK_DIR="$HOME/GPU_CSC367"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${SCRIPT_DIR}/.."
-BUILD_DIR="${PROJECT_DIR}/build"
+BUILD_DIR="${WORK_DIR}/build"
 EXECUTABLE="${BUILD_DIR}/warp_example"
-REPORT_DIR="${PROJECT_DIR}/prof_reports"
+REPORT_DIR="${WORK_DIR}/prof_reports"
 NCU="/usr/local/cuda-12.5/bin/ncu"
 
 if [[ ! -x "${EXECUTABLE}" ]]; then

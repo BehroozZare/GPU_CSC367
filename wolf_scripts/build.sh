@@ -3,16 +3,18 @@
 #SBATCH --partition=csc367-compute
 #SBATCH --job-name build
 #SBATCH --gres=gpu
-#SBATCH --output=build_%j.out
+#SBATCH --output=%x_%j.out
 
 set -euo pipefail
 
+WORK_DIR="$HOME/GPU_CSC367"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${SCRIPT_DIR}/.."
-BUILD_DIR="${PROJECT_DIR}/build"
+BUILD_DIR="${WORK_DIR}/build"
 
 module load cuda/12.5 2>/dev/null || true
 
+mkdir -p "${WORK_DIR}"
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
