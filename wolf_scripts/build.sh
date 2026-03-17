@@ -19,7 +19,7 @@ cd "${BUILD_DIR}"
 
 cmake "${PROJECT_DIR}" \
   -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
-  -DCUDA_ARCHITECTURES="86"
+  -DCMAKE_CUDA_ARCHITECTURES=86
 make -j"$(nproc)"
 
 echo "Build complete. Executables in ${BUILD_DIR}:"
