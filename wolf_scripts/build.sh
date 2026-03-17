@@ -11,13 +11,15 @@ WORK_DIR="$HOME/GPU_CSC367"
 PROJECT_DIR="${SLURM_SUBMIT_DIR}"
 BUILD_DIR="${WORK_DIR}/build"
 
-module load cuda/12.5 2>/dev/null || true
+export PATH="/usr/local/cuda/bin:${PATH}"
 
 mkdir -p "${WORK_DIR}"
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
-cmake "${PROJECT_DIR}" -DCUDA_ARCHITECTURES="86"
+cmake "${PROJECT_DIR}" \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+  -DCUDA_ARCHITECTURES="86"
 make -j"$(nproc)"
 
 echo "Build complete. Executables in ${BUILD_DIR}:"
