@@ -1,0 +1,112 @@
+=====================================
+  NSIGHT COMPUTE (ncu) -- BASICS
+=====================================
+
+# Simplest invocation: profile all kernels
+ncu ./warp_example 16 256
+
+# Profile and print a summary to terminal
+ncu --set default ./warp_example 16 256
+
+
+=====================================
+  EXPORTING A REPORT (.ncu-rep)
+=====================================
+
+# Save to a file you can open in Nsight Compute GUI
+ncu --export report.ncu-rep ./warp_example 16 256
+
+# Open later with:
+#   ncu-ui report.ncu-rep
+
+
+=====================================
+  CHOOSING SECTIONS
+=====================================
+
+# Each --section adds a category of metrics to collect.
+# Common ones:
+
+ncu \
+  --section LaunchStats \
+  --section Occupancy \
+  --section WarpStateStats \
+  --section MemoryWorkloadAnalysis \
+  --section SourceCounters \
+  ./warp_example 16 256
+
+# LaunchStats            -- grid/block dims, registers per thread
+# Occupancy              -- achieved vs theoretical occupancy
+# WarpStateStats         -- stall reasons, active warps
+# MemoryWorkloadAnalysis -- throughput, L1/L2 hit rates
+# SourceCounters         -- per-line instruction counts
+
+
+=====================================
+  ROOFLINE ANALYSIS
+=====================================
+
+# --set roofline collects everything needed for
+# the roofline chart in the GUI
+ncu --set roofline \
+  --export roofline_report.ncu-rep \
+  ./warp_example 16 256
+
+
+=====================================
+  FULL EXAMPLE (warp divergence)
+=====================================
+
+ncu \
+  --set roofline \
+  --section MemoryWorkloadAnalysis \
+  --section WarpStateStats \
+  --section SourceCounters \
+  --section LaunchStats \
+  --section Occupancy \
+  --section MemoryWorkloadAnalysis_Tables \
+  --export warp_report.ncu-rep \
+  ./warp_example 16 256
+
+
+=====================================
+  FULL EXAMPLE (strided copy)
+=====================================
+
+ncu \
+  --set roofline \
+  --section MemoryWorkloadAnalysis \
+  --section WarpStateStats \
+  --section SourceCounters \
+  --section LaunchStats \
+  --section Occupancy \
+  --section MemoryWorkloadAnalysis_Tables \
+  --export stride_report.ncu-rep \
+  ./stride_example 32 256
+
+
+=====================================
+  USEFUL FLAGS
+=====================================
+
+# Profile only a specific kernel by name
+ncu --kernel-name divergence_kernel ./warp_example 16 256
+
+# Skip first N kernel launches (warmup)
+ncu --launch-skip 5 --launch-count 1 ./warp_example 16 256
+
+# Collect all available sections
+ncu --set full ./warp_example 16 256
+
+# CSV output for scripting
+ncu --csv ./warp_example 16 256 > metrics.csv
+
+
+=====================================
+  NOTE: sudo
+=====================================
+
+# On Linux you typically need sudo (or setting
+# /proc/sys/kernel/perf_event_paranoid) for
+# hardware counters:
+sudo ncu --set roofline ./warp_example 16 256

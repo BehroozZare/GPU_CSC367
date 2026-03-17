@@ -1,0 +1,115 @@
+=====================================
+  CPU BASELINE EXAMPLE
+=====================================
+
+void func(const int* input, int* output,
+                    int N, int tuning_param) {
+    for (int i = 0; i < N; i++) {
+        int lane_id = i % 32;
+        int acc = input[i];
+        if (lane_id < tuning_param) {
+            for (int j = 0; j < 100; j++)
+                acc = std::sqrt(acc * 1.00001f + 1.0f);
+        } else {
+            for (int j = 0; j < 100; j++)
+                acc = std::sqrt(acc * 0.99999f + 0.5f);
+        }
+        output[i] = acc;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    int tuning_param = atoi(argv[1]);
+    int N = 1e7;
+
+    std::vector<int> input(N), output(N);
+    for (int i = 0; i < N; i++) input[i] = i;
+
+    func(input.data(), output.data(), N, tuning_param);
+    return 0;
+}
+
+
+=====================================
+  WARP DIVERGENCE EXAMPLE (kernel)
+=====================================
+
+__global__ void divergence_kernel(int* input, int* output,
+                                  int N, int tuning_param) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane_id = threadIdx.x & 31;
+    if (tid >= N) return;
+
+    int acc = input[tid];
+    if (lane_id < tuning_param) {
+        for (int i = 0; i < 100; i++)
+            acc = sqrtf(acc * 1.00001f + 1.0f);
+    } else {
+        for (int i = 0; i < 100; i++)
+            acc = sqrtf(acc * 0.99999f + 0.5f);
+    }
+    output[tid] = acc;
+}
+
+=====================================
+  WARP DIVERGENCE EXAMPLE (host)
+=====================================
+
+int main(int argc, char* argv[]) {
+    int tuning_param = atoi(argv[1]);
+    int N = 1e7;
+
+    int *d_in, *d_out;
+    cudaMalloc(&d_in,  N * sizeof(int));
+    cudaMalloc(&d_out, N * sizeof(int));
+    cudaMemcpy(d_in, h_data, N * sizeof(int), cudaMemcpyHostToDevice);
+
+    int block = 256;
+    int grid  = (N + block - 1) / block;
+    divergence_kernel<<<grid, block>>>(d_in, d_out, N, tuning_param);
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(h_out, d_out, N * sizeof(int), cudaMemcpyDeviceToHost);
+
+    cudaFree(d_in);
+    cudaFree(d_out);
+    return 0;
+}
+
+
+=====================================
+  STRIDED COPY EXAMPLE (kernel)
+=====================================
+
+__global__ void strided_copy(const int* input, int* output,
+                             int N, int stride) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N) return;
+
+    output[tid] = input[tid * stride];
+}
+
+=====================================
+  STRIDED COPY EXAMPLE (host)
+=====================================
+
+int main(int argc, char* argv[]) {
+    int stride = atoi(argv[1]);
+    int X = 1000000;
+    int input_size  = 32 * X;   // 32M ints
+    int output_size = X;        //  1M ints
+
+    int *d_in, *d_out;
+    cudaMalloc(&d_in,  input_size  * sizeof(int));
+    cudaMalloc(&d_out, output_size * sizeof(int));
+    cudaMemcpy(d_in, h_input, input_size * sizeof(int), cudaMemcpyHostToDevice);
+
+    int block = 256;
+    int grid  = (output_size + block - 1) / block;
+    strided_copy<<<grid, block>>>(d_in, d_out, output_size, stride);
+    cudaDeviceSynchronize();
+
+    cudaFree(d_in);
+    cudaFree(d_out);
+    return 0;
+}
