@@ -8,8 +8,7 @@
 set -euo pipefail
 
 WORK_DIR="$HOME/GPU_CSC367"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="${SCRIPT_DIR}/.."
+PROJECT_DIR="${SLURM_SUBMIT_DIR}"
 BUILD_DIR="${WORK_DIR}/build"
 
 module load cuda/12.5 2>/dev/null || true
