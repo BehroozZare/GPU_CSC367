@@ -37,43 +37,46 @@ int main(int argc, char* argv[]) {
     int stride = std::atoi(argv[1]);
     int thread_per_block = std::atoi(argv[2]);
 
+    const int MAX_STRIDE = 2048;
     const int X = 1000000;
-    const int input_size = 32 * X;
+    const long long input_size = (long long)MAX_STRIDE * X;
     const int output_size = X;
 
-    if (stride < 1 || stride > 32) {
-        std::fprintf(stderr, "stride must be between 1 and 32\n");
+    if (stride < 1 || stride > MAX_STRIDE) {
+        std::fprintf(stderr, "stride must be between 1 and %d\n", MAX_STRIDE);
         return 1;
     }
 
-    std::vector<int> h_input(input_size);
+    long long actual_input_size = (long long)stride * output_size;
+
+    std::vector<int> h_input(actual_input_size);
     std::vector<int> h_output(output_size);
     int* d_input  = nullptr;
     int* d_output = nullptr;
 
-    for (int i = 0; i < input_size; i++){
-        h_input[i] = i;
+    for (long long i = 0; i < actual_input_size; i++){
+        h_input[i] = (int)i;
     }
 
-    printf("Input size : %lu MB (%d elements)\n",
-           (unsigned long)(input_size * sizeof(int)) / 1024 / 1024, input_size);
+    printf("Input size : %lld MB (%lld elements)\n",
+           (long long)(actual_input_size * sizeof(int)) / 1024 / 1024, actual_input_size);
     printf("Output size: %lu MB (%d elements)\n",
            (unsigned long)(output_size * sizeof(int)) / 1024 / 1024, output_size);
     printf("Stride     : %d\n", stride);
 
-    GPU_CHECK(cudaMalloc(&d_input,  input_size  * sizeof(int)));
+    GPU_CHECK(cudaMalloc(&d_input,  actual_input_size * sizeof(int)));
     GPU_CHECK(cudaMalloc(&d_output, output_size * sizeof(int)));
-    GPU_CHECK(cudaMemcpy(d_input, h_input.data(), input_size * sizeof(int), cudaMemcpyHostToDevice));
+    GPU_CHECK(cudaMemcpy(d_input, h_input.data(), actual_input_size * sizeof(int), cudaMemcpyHostToDevice));
 
     dim3 block_size(thread_per_block);
     dim3 grid_size((output_size + thread_per_block - 1) / thread_per_block);
 
     auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < 10; i++){
-        strided_copy_kernel<<<grid_size, block_size>>>(d_input, d_output, output_size, stride);
-        GPU_CHECK(cudaGetLastError());
-        GPU_CHECK(cudaDeviceSynchronize());
-    }
+
+    strided_copy_kernel<<<grid_size, block_size>>>(d_input, d_output, output_size, stride);
+    GPU_CHECK(cudaGetLastError());
+    GPU_CHECK(cudaDeviceSynchronize());
+
     auto end = std::chrono::high_resolution_clock::now();
 
     GPU_CHECK(cudaMemcpy(h_output.data(), d_output, output_size * sizeof(int), cudaMemcpyDeviceToHost));
@@ -98,7 +101,7 @@ int main(int argc, char* argv[]) {
             std::to_string(static_cast<long long>(now_time_t)),
             std::to_string(stride),
             std::to_string(X),
-            std::to_string(input_size),
+            std::to_string(actual_input_size),
             std::to_string(thread_per_block),
             std::to_string(grid_size.x),
             std::to_string(avg_us)

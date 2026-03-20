@@ -1,0 +1,160 @@
+=====================================
+  SHARED MEMORY -- THE IDEA
+=====================================
+
+Problem:  In a 1D stencil every thread reads its
+          neighbors from global memory (~400-800 cycles).
+          Neighboring threads read OVERLAPPING data:
+
+          Thread 0 reads: input[0], input[1], input[2]
+          Thread 1 reads: input[1], input[2], input[3]
+          Thread 2 reads: input[2], input[3], input[4]
+                               ^^^^^^^^^^^^^^^^^
+                               redundant loads!
+
+Solution: Load the tile + halo into shared memory
+          (~5 cycles) once, then every thread reads
+          from shared memory instead.
+
+  Global memory  : ~400-800 cycle latency
+  Shared memory  : ~5 cycle latency  (~100x faster)
+
+
+=====================================
+  1D STENCIL -- NAIVE KERNEL (R=1)
+=====================================
+
+// Each thread reads 3 elements from GLOBAL memory.
+// Two of those reads overlap with each neighbor.
+
+__global__ void stencil_global(
+        const float* input,
+        float* output, int N) {
+
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= N) return;
+
+    float left   = (gid > 0)     ? input[gid - 1] : 0.0f;
+    float center =                  input[gid];
+    float right  = (gid < N - 1) ? input[gid + 1] : 0.0f;
+
+    output[gid] = (left + center + right) / 3.0f;
+}
+
+
+=====================================
+  1D STENCIL -- SHARED MEMORY (R=1)
+=====================================
+
+// Shared memory layout (blockDim.x + 2 floats):
+//
+//  [left_halo]  [---- tile (blockDim.x) ----]  [right_halo]
+//   smem[0]      smem[1] ... smem[blockDim.x]   smem[blockDim.x+1]
+
+__global__ void stencil_shared(
+        const float* input,
+        float* output, int N) {
+
+    extern __shared__ float smem[];
+
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lid = threadIdx.x;
+
+    // 1. Every thread loads its own element
+    smem[lid + 1] = (gid < N) ? input[gid] : 0.0f;
+
+    // 2. First thread loads left halo
+    if (lid == 0)
+        smem[0] = (gid > 0) ? input[gid - 1] : 0.0f;
+
+    // 3. Last thread loads right halo
+    if (lid == blockDim.x - 1)
+        smem[blockDim.x + 1] = (gid+1 < N)
+                              ? input[gid + 1] : 0.0f;
+
+    // 4. Wait for all loads to finish
+    __syncthreads();
+
+    if (gid >= N) return;
+
+    // 5. Compute from shared memory (fast!)
+    output[gid] = (smem[lid] + smem[lid+1] + smem[lid+2])
+                / 3.0f;
+}
+
+// Launch: shared memory = (blockDim.x + 2) * sizeof(float)
+// stencil_shared<<<grid, block, smem_bytes>>>(...)
+
+
+=====================================
+  1D STENCIL -- HOST CODE
+=====================================
+
+int main(int argc, char* argv[]) {
+    int block = atoi(argv[1]);   // e.g. 256
+    int N = 1e7;                 // ~40 MB
+
+    float *d_in, *d_out;
+    cudaMalloc(&d_in,  N * sizeof(float));
+    cudaMalloc(&d_out, N * sizeof(float));
+    cudaMemcpy(d_in, h_input, N * sizeof(float),
+               cudaMemcpyHostToDevice);
+
+    dim3 grid((N + block - 1) / block);
+
+    // Global memory version
+    stencil_global<<<grid, block>>>(d_in, d_out, N);
+
+    // Shared memory version
+    size_t smem = (block + 2) * sizeof(float);
+    stencil_shared<<<grid, block, smem>>>(
+        d_in, d_out, N);
+
+    cudaDeviceSynchronize();
+    cudaFree(d_in);
+    cudaFree(d_out);
+    return 0;
+}
+
+
+=====================================
+  WHY SHARED MEMORY WINS
+=====================================
+
+Naive (global):  Every thread issues 3 global loads.
+                 Total global loads = 3 * N
+
+Shared memory:   Every thread issues 1 global load
+                 into shared memory (+ 2 halo loads
+                 per block, negligible).
+                 Total global loads ~ N
+
+                 Then 3 reads from shared memory
+                 (~100x lower latency).
+
+Data reuse factor = 3x  (for R=1)
+For larger R the benefit grows:  2R+1  reads/thread
+  R=1  -->  3x reuse
+  R=4  -->  9x reuse
+  R=16 --> 33x reuse
+
+
+=====================================
+  PROFILING (ncu)
+=====================================
+
+ncu \
+  --set roofline \
+  --section MemoryWorkloadAnalysis \
+  --section WarpStateStats \
+  --section Occupancy \
+  --section LaunchStats \
+  --export stencil_report.ncu-rep \
+  ./stencil_example 256
+
+# Compare the two kernels in the report:
+#   - stencil_global  vs  stencil_shared
+#   - Look at:
+#     * Memory throughput (GB/s)
+#     * L1/L2 hit rates
+#     * Elapsed cycles

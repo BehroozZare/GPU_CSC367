@@ -1,0 +1,117 @@
+=====================================
+  LATENCY HIDING -- THE IDEA
+=====================================
+
+Problem:  Global memory loads take ~400-800 cycles.
+          While a warp waits, the SM does nothing
+          ... unless it has OTHER warps to run.
+
+Solution: More resident warps per SM = more chances
+          to switch away from a stalled warp.
+
+We control this by changing threads_per_block while
+launching exactly one block per SM.
+
+  32 threads/block  -->  1 warp  per SM  (worst)
+  64 threads/block  -->  2 warps per SM
+ 128 threads/block  -->  4 warps per SM
+ 256 threads/block  -->  8 warps per SM  (best)
+
+
+=====================================
+  LATENCY HIDING EXAMPLE (kernel)
+=====================================
+
+// Pointer chasing: each load depends on the
+// previous load's value.  Loads are strictly
+// serial within a thread -- the ONLY way to
+// keep the memory pipeline busy is to switch
+// to another warp.
+
+__global__ void latency_hiding_kernel(
+        const int* __restrict__ lookup,
+        int* __restrict__ output,
+        int N, int chain_length) {
+
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
+
+    for (int elem = tid; elem < N; elem += total_threads) {
+        int idx = elem;
+        for (int i = 0; i < chain_length; i++)
+            idx = lookup[idx];   // dependent load!
+        output[elem] = idx;
+    }
+}
+
+=====================================
+  LATENCY HIDING EXAMPLE (host)
+=====================================
+
+int main(int argc, char* argv[]) {
+    int chain_length = atoi(argv[1]);   // e.g. 10
+    int block        = atoi(argv[2]);   // 32..256
+    int N = 1e7;                        // ~40 MB
+
+    // Random lookup table -- defeats caching
+    srand(42);
+    for (int i = 0; i < N; i++)
+        h_lookup[i] = rand() % N;
+
+    int *d_lookup, *d_out;
+    cudaMalloc(&d_lookup, N * sizeof(int));
+    cudaMalloc(&d_out,    N * sizeof(int));
+    cudaMemcpy(d_lookup, h_lookup, N * sizeof(int),
+               cudaMemcpyHostToDevice);
+
+    // One block per SM -- threads_per_block
+    // directly controls warps per SM
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    int grid = prop.multiProcessorCount;
+
+    latency_hiding_kernel<<<grid, block>>>(
+        d_lookup, d_out, N, chain_length);
+    cudaDeviceSynchronize();
+
+    cudaFree(d_lookup);
+    cudaFree(d_out);
+    return 0;
+}
+
+
+=====================================
+  WHY ONE BLOCK PER SM?
+=====================================
+
+If we launched (N + block-1)/block blocks:
+
+  block=32   --> 312,500 blocks
+  block=256  -->  39,063 blocks
+
+Both cases flood every SM with many blocks,
+giving plenty of warps regardless of block size.
+Latency hiding looks the same --> no demo effect.
+
+By launching exactly multiProcessorCount blocks
+(one per SM), threads_per_block is the ONLY knob
+that controls resident warps.
+
+
+=====================================
+  PROFILING (ncu)
+=====================================
+
+ncu \
+  --set roofline \
+  --section WarpStateStats \
+  --section Occupancy \
+  --section MemoryWorkloadAnalysis \
+  --section LaunchStats \
+  --export latency_hiding_report.ncu-rep \
+  ./latency_hiding_example 10 32
+
+# Compare 32 vs 256 threads -- look at:
+#   - Occupancy  (achieved warps / theoretical)
+#   - WarpStateStats  (stall_long_scoreboard)
+#   - Elapsed Cycles

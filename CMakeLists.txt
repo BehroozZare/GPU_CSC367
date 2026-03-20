@@ -45,6 +45,9 @@ endif()
 file(GLOB SOURCES 
     "demo/warp_example.cu"
     "demo/stride_example.cu"
+    "demo/simple_copy.cu"
+    "demo/latency_hiding_example.cu"
+    "demo/stencil_example.cu"
 )
 
 # Create one executable per source file
