@@ -6,11 +6,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Default build directory (adjust if you use a different one)
-BUILD_DIR="${SCRIPT_DIR}/build"
+BUILD_DIR="${SCRIPT_DIR}/../build"
 EXECUTABLE_NAME="stride_example"
 
-STRIDES=(1 2 4 8 16 32)
-BLOCK_SIZES=(128 256 512 768 1024)
+STRIDES=(1 2 4 8 16 32 64 128 256 512 1024 2048)
+BLOCK_SIZES=(256)
 
 if [[ ! -x "${BUILD_DIR}/${EXECUTABLE_NAME}" ]]; then
   echo "Error: executable '${EXECUTABLE_NAME}' not found in '${BUILD_DIR}'."
