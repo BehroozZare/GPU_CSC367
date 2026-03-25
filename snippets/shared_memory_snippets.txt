@@ -1,0 +1,253 @@
+=============================================
+  SHARED MEMORY -- THE PROBLEM
+=============================================
+
+Matrix transpose: C[col][row] = A[row][col]
+
+Naive kernel (global memory only):
+  - Read  A[row][col]   -->  threadIdx.x in col
+                             consecutive threads read consecutive columns
+                             ==> COALESCED read
+
+  - Write C[col][row]   -->  threadIdx.x in col
+                             consecutive threads write rows apart
+                             ==> UNCOALESCED write (stride = ld)
+
+This is the pathological case: 32 threads each
+trigger a separate 32-byte transaction.
+  Bytes transferred: 32 x 32 = 1024
+  Bytes used:        32 x 4  =  128
+  Utilization:       12.5%
+
+
+=============================================
+  SHARED MEMORY -- THE IDEA
+=============================================
+
+Shared memory sits on the SM (same silicon as L1).
+  - Much lower latency than global memory
+  - Much higher bandwidth
+  - Accessible by all threads in a block
+  - Can be used as a user-managed cache
+
+Strategy for matrix transpose:
+  1. Load a 32x32 tile from global memory into
+     shared memory (coalesced read)
+  2. __syncthreads()
+  3. Write the tile from shared memory to global
+     memory with swapped indices (coalesced write)
+
+Both global accesses are now coalesced!
+
+
+=============================================
+  NAIVE TRANSPOSE (kernel)
+=============================================
+
+#define INDX(row, col, ld) ((row) * (ld) + (col))
+
+__global__ void naive_transpose(
+        const float* __restrict__ a,
+        float* __restrict__ c,
+        int m) {
+    int col = blockDim.x * blockIdx.x + threadIdx.x;
+    int row = blockDim.y * blockIdx.y + threadIdx.y;
+
+    if (row < m && col < m)
+        c[INDX(col, row, m)] = a[INDX(row, col, m)];
+}
+
+// threadIdx.x varies fastest --> col varies fastest
+// Read:  a[row * m + col]  consecutive col = coalesced
+// Write: c[col * m + row]  consecutive col = stride m
+//                          ==> UNCOALESCED
+
+
+=============================================
+  SHARED MEMORY TRANSPOSE (kernel)
+=============================================
+
+__global__ void shared_mem_transpose(
+        const float* __restrict__ a,
+        float* __restrict__ c,
+        int m) {
+    __shared__ float tile[32][32];
+
+    int tileCol = blockDim.x * blockIdx.x;
+    int tileRow = blockDim.y * blockIdx.y;
+
+    int col = tileCol + threadIdx.x;
+    int row = tileRow + threadIdx.y;
+
+    // Step 1: global -> shared (coalesced global read)
+    if (row < m && col < m)
+        tile[threadIdx.x][threadIdx.y] = a[INDX(row, col, m)];
+
+    __syncthreads();
+
+    // Step 2: shared -> global (coalesced global write)
+    int outCol = tileRow + threadIdx.x;
+    int outRow = tileCol + threadIdx.y;
+
+    if (outRow < m && outCol < m)
+        c[INDX(outRow, outCol, m)] = tile[threadIdx.y][threadIdx.x];
+}
+
+// Global reads:  a[INDX(row, col, m)]
+//   threadIdx.x in col => consecutive => coalesced
+//
+// Global writes: c[INDX(outRow, outCol, m)]
+//   threadIdx.x in outCol (second arg) => coalesced
+//
+// Shared memory:
+//   tile[threadIdx.x][threadIdx.y]  (store)
+//     threadIdx.x is the FIRST index in a row-major
+//     2D array => stride 32 across banks
+//     ==> 32-WAY BANK CONFLICT
+//
+//   tile[threadIdx.y][threadIdx.x]  (load)
+//     threadIdx.x is the SECOND index
+//     => stride 1 across banks => NO conflict
+
+
+=============================================
+  BANK CONFLICTS -- WHY THEY HAPPEN
+=============================================
+
+Shared memory has 32 banks.
+Successive 32-bit words map to successive banks:
+
+  Address 0  -> Bank 0
+  Address 1  -> Bank 1
+  ...
+  Address 31 -> Bank 31
+  Address 32 -> Bank 0   (wraps around)
+
+For __shared__ float tile[32][32]:
+
+  tile[0][0]  = Bank 0     tile[0][1]  = Bank 1
+  tile[1][0]  = Bank 0     tile[1][1]  = Bank 1
+  tile[2][0]  = Bank 0     ...
+
+  Column access (varying first index, fixed second):
+    tile[0][0], tile[1][0], tile[2][0], ...
+    All hit Bank 0 ==> 32-way conflict!
+
+  Row access (fixed first index, varying second):
+    tile[0][0], tile[0][1], tile[0][2], ...
+    Banks 0, 1, 2, ... ==> No conflict
+
+
+=============================================
+  FIXING BANK CONFLICTS: +1 PADDING
+=============================================
+
+__shared__ float tile[32][32 + 1];  // 32x33
+
+Now the row stride is 33 instead of 32:
+
+  tile[0][0]  = Bank 0
+  tile[1][0]  = Bank 33 % 32 = Bank 1
+  tile[2][0]  = Bank 66 % 32 = Bank 2
+  ...
+
+Column access now hits different banks!
+Both column and row access are conflict-free.
+
+__global__ void shared_mem_transpose_padded(
+        const float* __restrict__ a,
+        float* __restrict__ c,
+        int m) {
+    __shared__ float tile[32][32 + 1];  // only change!
+
+    int tileCol = blockDim.x * blockIdx.x;
+    int tileRow = blockDim.y * blockIdx.y;
+
+    int col = tileCol + threadIdx.x;
+    int row = tileRow + threadIdx.y;
+
+    if (row < m && col < m)
+        tile[threadIdx.x][threadIdx.y] = a[INDX(row, col, m)];
+
+    __syncthreads();
+
+    int outCol = tileRow + threadIdx.x;
+    int outRow = tileCol + threadIdx.y;
+
+    if (outRow < m && outCol < m)
+        c[INDX(outRow, outCol, m)] = tile[threadIdx.y][threadIdx.x];
+}
+
+
+=============================================
+  HOST CODE
+=============================================
+
+int main(int argc, char* argv[]) {
+    int M = atoi(argv[1]);   // e.g. 4096
+    long long total = (long long)M * M;
+
+    // Host data
+    std::vector<float> h_a(total);
+    std::vector<float> h_out(total);
+    for (long long i = 0; i < total; i++)
+        h_a[i] = (float)i;
+
+    // Device allocation
+    float *d_a, *d_c;
+    cudaMalloc(&d_a, total * sizeof(float));
+    cudaMalloc(&d_c, total * sizeof(float));
+    cudaMemcpy(d_a, h_a.data(),
+               total * sizeof(float),
+               cudaMemcpyHostToDevice);
+
+    // 2D grid of 32x32 thread blocks
+    dim3 block(32, 32);   // 1024 threads per block
+    dim3 grid((M + 31) / 32, (M + 31) / 32);
+
+    // Warm-up + benchmark each kernel
+    naive_transpose<<<grid, block>>>(d_a, d_c, M);
+   ....
+}
+
+
+=============================================
+  PERFORMANCE SUMMARY (4096 x 4096)
+=============================================
+
+  Kernel                    | Global Coalescing | Bank Conflicts
+  ------------------------- | ----------------- | --------------
+  naive_transpose           | Read: yes         | N/A (no smem)
+                            | Write: NO         |
+  shared_mem_transpose      | Read: yes         | 32-way on
+                            | Write: yes        |   store to smem
+  shared_mem_transpose_     | Read: yes         | NONE
+    padded                  | Write: yes        |
+
+Expected speedup chain:
+  naive  >>  shared_mem  >  shared_mem_padded
+  (worst)                   (best)
+
+
+=============================================
+  PROFILING (ncu)
+=============================================
+
+sudo ncu \
+  --set roofline \
+  --section MemoryWorkloadAnalysis \
+  --section MemoryWorkloadAnalysis_Tables \
+  --section WarpStateStats \
+  --section Occupancy \
+  --section LaunchStats \
+  --section SourceCounters \
+  --export shared_memory_report.ncu-rep \
+  ./shared_memory_no_conflict 4096
+
+Key metrics to compare across the 3 kernels:
+  - l1tex__data_bank_conflicts_pipe_lsu_mem_shared
+    (0 for naive, high for shared_mem, 0 for padded)
+  - sm__sass_l1tex_t_sectors_pipe_lsu_mem_global_op_st
+    (high for naive, lower for shared_mem/padded)
+  - Memory throughput  (GB/s)
+  - Elapsed Cycles

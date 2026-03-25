@@ -48,6 +48,8 @@ file(GLOB SOURCES
     "demo/simple_copy.cu"
     "demo/latency_hiding_example.cu"
     "demo/stencil_example.cu"
+    "demo/shared_memory_basic.cu"
+    "demo/shared_memory_no_conflict.cu"
 )
 
 # Create one executable per source file

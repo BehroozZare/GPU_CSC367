@@ -23,4 +23,4 @@ cmake "${PROJECT_DIR}" \
 make -j"$(nproc)"
 
 echo "Build complete. Executables in ${BUILD_DIR}:"
-ls -1 warp_example stride_example cpu_example 2>/dev/null
+ls -1 warp_example stride_example cpu_example shared_memory_basic shared_memory_no_conflict 2>/dev/null
