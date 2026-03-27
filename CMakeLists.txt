@@ -50,6 +50,8 @@ file(GLOB SOURCES
     "demo/stencil_example.cu"
     "demo/shared_memory_basic.cu"
     "demo/shared_memory_no_conflict.cu"
+    "demo/stream_example.cu"
+    "demo/stream_image_blur_example.cu"
 )
 
 # Create one executable per source file

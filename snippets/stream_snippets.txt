@@ -1,0 +1,288 @@
+=====================================
+  CUDA STREAMS -- THE IDEA
+=====================================
+
+Problem:  Two kernels on the DEFAULT stream run
+          one after the other (serial), even when
+          each kernel only uses part of the GPU.
+
+Solution: Put the kernels on SEPARATE streams.
+          The GPU scheduler can then run them at
+          the same time on different SMs.
+
+
+  Default stream (serial)
+  ┌──────────────┐ ┌──────────────┐
+  │  Kernel A    │→│  Kernel B    │  total = 2T
+  │  (40 SMs)    │ │  (40 SMs)    │
+  └──────────────┘ └──────────────┘
+      40 SMs idle      40 SMs idle
+
+  Two streams (concurrent)
+  ┌──────────────┐
+  │  Kernel A    │  stream 1  (40 SMs)
+  ├──────────────┤                      total = T
+  │  Kernel B    │  stream 2  (40 SMs)
+  └──────────────┘
+      all 80 SMs busy
+
+
+=====================================
+  50% OCCUPANCY -- WHY 768 THREADS?
+=====================================
+
+SM 86 (e.g. RTX 3080 Ti):
+  Max warps per SM  = 48
+  Max threads / SM  = 1536
+
+768 threads/block = 24 warps = 50% occupancy.
+
+Each kernel launches numSMs/2 blocks so it only
+fills HALF the SMs.  The other half sit idle in
+serial mode.  With two streams both halves are
+used simultaneously --> ~2x speedup.
+
+
+=====================================
+  STREAM EXAMPLE -- KERNELS
+=====================================
+
+// Two compute-heavy kernels.  Different constants
+// prevent the compiler from merging them.
+
+__global__ __launch_bounds__(768)
+void kernel_A(float* __restrict__ out,
+              int N, int iterations) {
+    int tid    = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+
+    for (int i = tid; i < N; i += stride) {
+        float val = (float)i;
+        for (int j = 0; j < iterations; j++)
+            val = val * 0.9999f + 0.0001f;
+        out[i] = val;
+    }
+}
+
+__global__ __launch_bounds__(768)
+void kernel_B(float* __restrict__ out,
+              int N, int iterations) {
+    int tid    = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+
+    for (int i = tid; i < N; i += stride) {
+        float val = (float)(N - i);
+        for (int j = 0; j < iterations; j++)
+            val = val * 0.9998f + 0.0002f;
+        out[i] = val;
+    }
+}
+
+
+=====================================
+  STREAM EXAMPLE -- HOST SETUP
+=====================================
+
+int main() {
+    int N          = 1 << 22;   // 4M elements
+    int iterations = 10000;
+
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    int num_sms = prop.multiProcessorCount;
+
+    int threads_per_block = 768;    // 24 warps
+    int blocks_per_kernel = num_sms / 2;
+
+    float *d_out_A, *d_out_B;
+    cudaMalloc(&d_out_A, N * sizeof(float));
+    cudaMalloc(&d_out_B, N * sizeof(float));
+
+    dim3 block(threads_per_block);
+    dim3 grid(blocks_per_kernel);
+
+    // ...
+}
+
+
+=====================================
+  SERIAL EXECUTION (DEFAULT STREAM)
+=====================================
+
+// Both kernels go on stream 0 (the default).
+// The GPU runs A first, then B.
+
+nvtxRangePushA("Serial");
+kernel_A<<<grid, block>>>(d_out_A, N, iterations);
+kernel_B<<<grid, block>>>(d_out_B, N, iterations);
+cudaDeviceSynchronize();
+nvtxRangePop();
+
+// Total time ≈ time(A) + time(B)
+
+
+=====================================
+  CONCURRENT EXECUTION (TWO STREAMS)
+=====================================
+
+// Create two non-default streams.
+cudaStream_t stream1, stream2;
+cudaStreamCreate(&stream1);
+cudaStreamCreate(&stream2);
+
+// Launch on separate streams -- GPU can overlap.
+nvtxRangePushA("Concurrent");
+kernel_A<<<grid, block, 0, stream1>>>(
+    d_out_A, N, iterations);
+kernel_B<<<grid, block, 0, stream2>>>(
+    d_out_B, N, iterations);
+cudaDeviceSynchronize();
+nvtxRangePop();
+
+// Total time ≈ max(time(A), time(B)) ≈ T/2
+
+cudaStreamDestroy(stream1);
+cudaStreamDestroy(stream2);
+
+
+=====================================
+  TIMING WITH CUDA EVENTS
+=====================================
+
+// CUDA events measure GPU time, not CPU time.
+// More accurate than chrono for GPU work.
+
+cudaEvent_t start, stop;
+cudaEventCreate(&start);
+cudaEventCreate(&stop);
+
+cudaEventRecord(start);       // on default stream
+kernel_A<<<grid, block, 0, stream1>>>(...);
+kernel_B<<<grid, block, 0, stream2>>>(...);
+cudaEventRecord(stop);        // waits for all streams
+cudaEventSynchronize(stop);
+
+float ms = 0.0f;
+cudaEventElapsedTime(&ms, start, stop);
+
+cudaEventDestroy(start);
+cudaEventDestroy(stop);
+
+
+=====================================
+  THE KERNEL LAUNCH SYNTAX
+=====================================
+
+kernel<<<grid, block, sharedMem, stream>>>(...);
+
+  grid      : number of blocks
+  block     : threads per block
+  sharedMem : dynamic shared memory bytes (0 here)
+  stream    : which stream to use (0 = default)
+
+
+=====================================
+  NVTX -- ANNOTATING THE TIMELINE
+=====================================
+
+#include <nvtx3/nvToolsExt.h>
+
+// NVTX (NVIDIA Tools Extension) lets you add
+// named ranges to the Nsight Systems timeline.
+// They appear as colored bars in the NVTX row.
+
+// Push a range (starts a named region):
+nvtxRangePushA("Serial");
+
+kernel_A<<<grid, block>>>(d_out_A, N, iterations);
+kernel_B<<<grid, block>>>(d_out_B, N, iterations);
+cudaDeviceSynchronize();
+
+// Pop the range (ends the region):
+nvtxRangePop();
+
+// Ranges can nest:
+nvtxRangePushA("Concurrent");
+  nvtxRangePushA("Launch kernels");
+  kernel_A<<<grid, block, 0, stream1>>>(...);
+  kernel_B<<<grid, block, 0, stream2>>>(...);
+  nvtxRangePop();
+
+  cudaDeviceSynchronize();
+nvtxRangePop();
+
+// In Nsight Systems GUI the NVTX row shows:
+//   ┌────── Serial ──────┐ ┌── Concurrent ──┐
+//   │ kernel_A → kernel_B│ │ kernel_A ║      │
+//   │                    │ │ kernel_B ║      │
+//   └────────────────────┘ └─────────────────┘
+//
+// No extra library to link -- NVTX3 is header-only.
+// Just #include <nvtx3/nvToolsExt.h>
+
+
+=====================================
+  KEY TAKEAWAYS
+=====================================
+
+1. Default stream serializes all kernel launches.
+
+2. Separate streams allow concurrent execution
+   when the GPU has free resources (idle SMs).
+
+3. Each kernel here uses numSMs/2 blocks with
+   768 threads = 24 warps per SM (50% occupancy).
+   Serial: half the SMs idle.  Concurrent: all busy.
+
+4. Speedup ≈ 2x because both kernels run on
+   disjoint sets of SMs simultaneously.
+
+5. Use cudaStreamCreate / cudaStreamDestroy to
+   manage stream lifetimes.
+
+6. Use Nsight Systems (nsys) to visualize the
+   kernel timeline and confirm overlap.
+
+7. Use NVTX ranges (nvtxRangePushA / nvtxRangePop)
+   to label phases in the profiler timeline.
+
+
+=====================================
+  PROFILING (nsys)
+=====================================
+
+# Nsight Systems shows the timeline -- perfect for
+# visualizing stream concurrency and NVTX ranges.
+
+nsys profile \
+  --stats=true \
+  --output stream_report \
+  ./stream_example 10000
+
+# Open the .nsys-rep file in Nsight Systems GUI:
+#   nsys-ui stream_report.nsys-rep
+#
+# Look at the NVTX row for "Serial" / "Concurrent"
+# and the CUDA HW row for kernel execution:
+#   Serial:     kernel_A ───> kernel_B
+#   Concurrent: kernel_A ═══╗
+#               kernel_B ═══╝  (overlapped)
+
+
+=====================================
+  PROFILING (ncu)
+=====================================
+
+# Nsight Compute profiles individual kernel metrics:
+# occupancy, roofline, warp stalls, memory throughput.
+
+ncu \
+  --set roofline \
+  --section WarpStateStats \
+  --section Occupancy \
+  --section LaunchStats \
+  --section MemoryWorkloadAnalysis \
+  --export stream_report.ncu-rep \
+  ./stream_example 10000
+
+# Open: ncu-ui stream_report.ncu-rep
